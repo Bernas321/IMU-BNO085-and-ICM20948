@@ -1,0 +1,4 @@
+adafruit-blinka
+adafruit-circuitpython-icm20x
+websockets
+

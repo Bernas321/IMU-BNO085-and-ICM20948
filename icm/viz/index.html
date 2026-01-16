@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ICM-20948 Quaternion Visualizer</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #0b0e14; color: #e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        right: 12px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        pointer-events: none;
+      }
+      #panel {
+        pointer-events: auto;
+        background: rgba(18, 24, 38, 0.75);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 10px;
+        padding: 10px 12px;
+        backdrop-filter: blur(8px);
+      }
+      #panel h3 { margin: 0 0 8px 0; font-size: 14px; font-weight: 650; }
+      #panel .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      #panel label { font-size: 13px; opacity: 0.95; }
+      #panel input[type="text"] { width: 220px; background: #0b1220; color: #e6edf3; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 6px 8px; }
+      #panel input[type="checkbox"] { transform: translateY(1px); }
+      #stats {
+        pointer-events: auto;
+        text-align: right;
+        background: rgba(18, 24, 38, 0.55);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 10px;
+        padding: 10px 12px;
+        backdrop-filter: blur(8px);
+        font-variant-numeric: tabular-nums;
+      }
+      #stats .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      #canvas { display:block; width: 100%; height: 100%; }
+      .muted { opacity: 0.70; }
+
+      /* CSS fallback cube */
+      #fallbackWrap {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+      }
+      #fallbackHint {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        padding: 6px 10px;
+        background: rgba(18, 24, 38, 0.55);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 10px;
+        font-size: 12px;
+        opacity: 0.8;
+      }
+      #fallbackCube {
+        width: 140px;
+        height: 140px;
+        transform-style: preserve-3d;
+        transform: rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+      }
+      #fallbackCube .face {
+        position: absolute;
+        width: 140px;
+        height: 140px;
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        color: rgba(255,255,255,0.85);
+        background: rgba(79, 70, 229, 0.18);
+        border: 1px solid rgba(255,255,255,0.18);
+        box-sizing: border-box;
+        backdrop-filter: blur(2px);
+      }
+      #fallbackCube .front  { transform: translateZ(70px); }
+      #fallbackCube .back   { transform: rotateY(180deg) translateZ(70px); }
+      #fallbackCube .right  { transform: rotateY( 90deg) translateZ(70px); }
+      #fallbackCube .left   { transform: rotateY(-90deg) translateZ(70px); }
+      #fallbackCube .top    { transform: rotateX( 90deg) translateZ(70px); }
+      #fallbackCube .bottom { transform: rotateX(-90deg) translateZ(70px); }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div id="panel">
+        <h3>ICM-20948 Visual Test</h3>
+        <div class="row">
+          <label>WebSocket URL:
+            <input id="wsUrl" type="text" value="" />
+          </label>
+          <label><input id="invertQuat" type="checkbox" /> invert quaternion</label>
+          <label><input id="swapYZ" type="checkbox" /> swap Y/Z</label>
+          <label><input id="flipZ" type="checkbox" /> flip Z</label>
+          <button id="connectBtn" style="pointer-events:auto;">Connect</button>
+        </div>
+        <div class="muted" style="margin-top:6px; font-size:12px;">
+          Tip: if motion looks “wrong”, try toggling invert/swap/flip (frame convention differences).
+        </div>
+      </div>
+      <div id="stats" class="mono">
+        <div>Status: <span id="status">disconnected</span></div>
+        <div>WebGL: <span id="webgl">-</span></div>
+        <div>t_s: <span id="ts">-</span></div>
+        <div>RPY°: <span id="rpy">-</span></div>
+        <div>gyro rad/s: <span id="gyr">-</span></div>
+        <div>mag µT: <span id="mag">-</span></div>
+      </div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+    <!-- WebGL-independent fallback cube (CSS 3D) -->
+    <div id="fallbackWrap" aria-hidden="true">
+      <div id="fallbackCube">
+        <div class="face front">+Z</div>
+        <div class="face back">-Z</div>
+        <div class="face right">+X</div>
+        <div class="face left">-X</div>
+        <div class="face top">+Y</div>
+        <div class="face bottom">-Y</div>
+      </div>
+      <div id="fallbackHint">CSS cube fallback (no WebGL)</div>
+    </div>
+
+    <script type="module">
+      import * as THREE from "./vendor/three.module.js";
+      import { OrbitControls } from "./vendor/OrbitControls.js";
+
+      const canvas = document.getElementById("canvas");
+      const fallbackWrap = document.getElementById("fallbackWrap");
+      const fallbackCube = document.getElementById("fallbackCube");
+      const statusEl = document.getElementById("status");
+      const webglEl = document.getElementById("webgl");
+      function setStatus(s) { statusEl.textContent = s; }
+      function fatal(msg, err) {
+        console.error(msg, err);
+        setStatus("error");
+        const div = document.createElement("div");
+        div.style.position = "fixed";
+        div.style.left = "12px";
+        div.style.bottom = "12px";
+        div.style.right = "12px";
+        div.style.padding = "10px 12px";
+        div.style.background = "rgba(120, 20, 30, 0.75)";
+        div.style.border = "1px solid rgba(255,255,255,0.25)";
+        div.style.borderRadius = "10px";
+        div.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace";
+        div.style.whiteSpace = "pre-wrap";
+        div.textContent = msg + (err ? ("\n" + String(err)) : "");
+        document.body.appendChild(div);
+      }
+
+      window.addEventListener("error", (e) => {
+        fatal("JS error (see console for details).", e?.error || e?.message || e);
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        fatal("Unhandled promise rejection (see console for details).", e?.reason || e);
+      });
+
+      let renderer;
+      try {
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      } catch (e) {
+        fatal("WebGLRenderer failed to initialize. WebGL may be disabled in this browser/device.", e);
+        // Keep running so the CSS fallback cube still works.
+        renderer = null;
+      }
+      if (renderer) {
+        renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0e14);
+
+      // WebGL sanity info
+      try {
+        if (renderer) {
+          const gl = renderer.getContext();
+          const ver = gl.getParameter(gl.VERSION);
+          webglEl.textContent = ver;
+        } else {
+          webglEl.textContent = "disabled";
+        }
+      } catch (e) {
+        fatal("WebGL context created but querying VERSION failed.", e);
+      }
+
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 100);
+      camera.position.set(2.2, 1.6, 2.2);
+
+      let controls = null;
+      if (renderer) {
+        controls = new OrbitControls(camera, canvas);
+        controls.target.set(0, 0.3, 0);
+        controls.update();
+      }
+
+      // Lights
+      scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+      const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+      dir.position.set(3, 4, 2);
+      scene.add(dir);
+
+      // Axes + grid (world frame reference)
+      const axes = new THREE.AxesHelper(1.2);
+      scene.add(axes);
+      const grid = new THREE.GridHelper(6, 12, 0x334155, 0x1f2937);
+      grid.position.y = 0;
+      scene.add(grid);
+
+      // Cube representing IMU body frame
+      const cubeGeo = new THREE.BoxGeometry(0.5, 0.18, 0.35);
+      const cubeMat = new THREE.MeshStandardMaterial({
+        color: 0x4f46e5,
+        metalness: 0.15,
+        roughness: 0.35,
+        emissive: 0x111133,
+        emissiveIntensity: 0.8,
+      });
+      const cube = new THREE.Mesh(cubeGeo, cubeMat);
+      cube.position.y = 0.3;
+      scene.add(cube);
+
+      // Body axes attached to cube
+      const bodyAxes = new THREE.AxesHelper(0.7);
+      cube.add(bodyAxes);
+
+      const tsEl = document.getElementById("ts");
+      const rpyEl = document.getElementById("rpy");
+      const gyrEl = document.getElementById("gyr");
+      const magEl = document.getElementById("mag");
+
+      const wsUrlEl = document.getElementById("wsUrl");
+      const invertEl = document.getElementById("invertQuat");
+      const swapYZEl = document.getElementById("swapYZ");
+      const flipZEl = document.getElementById("flipZ");
+      const connectBtn = document.getElementById("connectBtn");
+
+      let ws = null;
+      let es = null;
+
+      function defaultWsUrl() {
+        // If you open the page from another machine (e.g. http://rpiberna2:8000),
+        // "localhost" would point to *your laptop*, not the Pi. Use same host as page.
+        let host = window.location.hostname || "localhost";
+        // Browsers cannot connect to 0.0.0.0; treat it as localhost.
+        if (host === "0.0.0.0") host = "localhost";
+        const proto = (window.location.protocol === "https:") ? "wss" : "ws";
+        return `${proto}://${host}:8765`;
+      }
+
+      // Default status
+      setStatus("disconnected");
+
+      function applyFrameTweaks(q) {
+        // q is THREE.Quaternion
+        // Optional axis swaps/flips to match sensor/body/world conventions.
+        // swap Y/Z:
+        if (swapYZEl.checked) {
+          const { x, y, z, w } = q;
+          q.set(x, z, y, w);
+        }
+        // flip Z:
+        if (flipZEl.checked) {
+          q.set(q.x, q.y, -q.z, q.w);
+        }
+      }
+
+      function connect() {
+        if (es) {
+          es.close();
+          es = null;
+        }
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        const url = (wsUrlEl.value.trim() || defaultWsUrl());
+        wsUrlEl.value = url;
+
+        function handleMsg(msg) {
+          if (!msg || msg.qw === undefined) return;
+
+          // Three.js quaternion order is (x, y, z, w).
+          const q = new THREE.Quaternion(msg.qx, msg.qy, msg.qz, msg.qw);
+          applyFrameTweaks(q);
+          if (invertEl.checked) q.invert();
+
+          // Apply to WebGL cube if available
+          if (cube && renderer) cube.quaternion.copy(q);
+
+          // HUD
+          tsEl.textContent = (msg.t_s ?? "-").toFixed ? msg.t_s.toFixed(3) : String(msg.t_s ?? "-");
+          if (msg.roll_deg !== undefined) {
+            rpyEl.textContent = `${msg.roll_deg.toFixed(2)}, ${msg.pitch_deg.toFixed(2)}, ${msg.yaw_deg.toFixed(2)}`;
+          }
+          if (msg.gx_rads !== undefined) {
+            gyrEl.textContent = `${msg.gx_rads.toFixed(3)}, ${msg.gy_rads.toFixed(3)}, ${msg.gz_rads.toFixed(3)}`;
+          }
+          if (msg.mx_uT !== undefined) {
+            magEl.textContent = `${msg.mx_uT.toFixed(2)}, ${msg.my_uT.toFixed(2)}, ${msg.mz_uT.toFixed(2)}`;
+          } else {
+            magEl.textContent = "-";
+          }
+
+          // CSS fallback cube uses Euler angles (degrees). This is purely for visualization.
+          if (msg.roll_deg !== undefined) {
+            const roll = msg.roll_deg;
+            const pitch = msg.pitch_deg;
+            const yaw = msg.yaw_deg;
+            fallbackCube.style.transform = `rotateZ(${yaw}deg) rotateY(${pitch}deg) rotateX(${roll}deg)`;
+          }
+        }
+
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+          // SSE mode
+          setStatus("connecting");
+          es = new EventSource(url);
+          es.onopen = () => setStatus("connected");
+          es.onerror = () => setStatus("error");
+          es.onmessage = (ev) => {
+            try {
+              handleMsg(JSON.parse(ev.data));
+            } catch {}
+          };
+          return;
+        }
+
+        // WebSocket mode
+        ws = new WebSocket(url);
+        setStatus("connecting");
+
+        ws.onopen = () => setStatus("connected");
+        ws.onclose = () => setStatus("disconnected");
+        ws.onerror = () => setStatus("error");
+
+        ws.onmessage = (ev) => {
+          try {
+            handleMsg(JSON.parse(ev.data));
+          } catch {}
+        };
+      }
+
+      connectBtn.onclick = connect;
+
+      function animate() {
+        if (renderer) renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+      animate();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        if (renderer) renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Set default + auto-connect on load
+      wsUrlEl.value = defaultWsUrl();
+      connect();
+    </script>
+  </body>
+</html>
+
+
